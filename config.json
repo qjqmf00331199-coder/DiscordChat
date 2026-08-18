@@ -1,0 +1,54 @@
+{
+  "channels": [
+    {
+      "id": "1539106867161341972",
+      "name": "gamedev",
+      "cwd": {
+        "claude": "D:\\moon-fragment-hunt",
+        "codex": "D:\\moon-fragment-hunt\\.worktrees\\codex",
+        "agy": "D:\\moon-fragment-hunt\\.worktrees\\agy"
+      },
+      "debate": { "owner": "claude", "reviewer": "codex", "moderators": ["agy"], "maxRounds": 3 }
+    },
+    {
+      "id": "1539106898677080074",
+      "name": "general",
+      "cwd": {
+        "claude": "D:\\Discordchat",
+        "codex": "D:\\Discordchat",
+        "agy": "D:\\Discordchat"
+      },
+      "debate": { "owner": "claude", "reviewer": "codex", "moderators": ["agy"], "maxRounds": 3 }
+    }
+  ],
+  "bots": [
+    {
+      "key": "claude",
+      "tokenEnv": "DISCORD_TOKEN_CLAUDE",
+      "aliases": ["claude", "c"],
+      "command": "C:\\Users\\qjqmf\\.local\\bin\\claude.exe",
+      "args": []
+    },
+    {
+      "key": "codex",
+      "tokenEnv": "DISCORD_TOKEN_CODEX",
+      "aliases": ["codex", "x"],
+      "command": "C:\\Users\\qjqmf\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+      "args": []
+    },
+    {
+      "key": "agy",
+      "tokenEnv": "DISCORD_TOKEN_AGY",
+      "aliases": ["agy", "a", "antigravity"],
+      "command": "C:\\Users\\qjqmf\\AppData\\Local\\agy\\bin\\agy.exe",
+      "args": ["--model", "gemini-3.1-pro-high", "--print-timeout", "30m"]
+    }
+  ],
+  "settings": {
+    "maxMessageLength": 1900,
+    "execTimeoutMs": 1800000,
+    "approvalTimeoutMs": 300000,
+    "usageDailyLimit": 100,
+    "usageWarnRatio": 0.8
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+.env
+bridge.log
+logs/*.log
+logs/*.jsonl
+logs/*.json
+npm-debug.log*
