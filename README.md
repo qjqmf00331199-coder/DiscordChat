@@ -1,120 +1,256 @@
 # llm-discord-bridge
 
-Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇는 다중 에이전트 브릿지로 씁니다. 한 채널에 메시지를 보내면 설정된 "토론(debate)" 파이프라인이 돌아가거나, 특정 봇을 지목해 1:1로 대화할 수 있습니다.
+Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇는 다중 에이전트 브릿지입니다. 채널에 메시지를 보내면 설정된 "토론(debate)" 파이프라인이 돌아가거나, 특정 봇을 지목해 1:1로 대화할 수 있습니다.
 
-## 동작 개요
+한 줄 요약: **Discord 채팅창 = 여러 AI 코딩 CLI를 동시에 부리는 리모컨.**
 
-- 채널마다 `config.json`에 참여 봇(owner/reviewer/moderators)을 지정합니다.
-- 기본 동작은 **debate 모드**: owner가 초안을 쓰고 reviewer가 검토, `maxRounds` 안에 합의 안 되면 moderator 패널이 다수결로 최종안을 채택합니다.
-- `!quick <질문>` 접두사를 쓰면 debate를 건너뛰고 각 봇이 독립적으로 즉시 답합니다.
-- `클로드:`, `코덱스:` 같은 별명 접두어나 `@멘션`으로 특정 봇만 지목해 1:1 대화도 가능합니다.
-- 각 봇은 비대화형(one-shot) CLI 호출로 동작하며(`claude -p`, `codex exec`, `agy --print`), 세션 컨텍스트는 브릿지가 직접 관리합니다.
-- 각 봇의 CLI 호출은 `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox` 류 플래그로 승인 없이 실행됩니다 — 신뢰된 로컬 환경에서만 쓰세요.
+---
 
-## debate 파이프라인 상세
+## 목차
 
-1. **owner 초안**: `chCfg.cwd[owner]`에서 owner CLI가 `prompt`로 초안 작성.
-2. **reviewer 검토 라운드** (최대 `maxRounds`회 반복):
-   - reviewer가 초안 보고 `STATUS: APPROVE`(승인) 또는 `STATUS: REVISE` + 수정 지시를 반환.
-   - `APPROVE`면 즉시 라운드 종료. `REVISE`면 owner가 피드백 반영해 재작성 후 다음 라운드.
-   - 마지막 라운드까지 `REVISE`면 owner 재작성 없이 바로 moderator 패널로 넘어감.
-3. **moderator 패널** (APPROVE로 안 끝났을 때만): 각 moderator가 "초안 유지" vs "reviewer 재작성 채택" 중 투표, 다수결로 최종안 확정. 채택 결과는 `⭐ 최종 채택` 메시지로 안내.
-4. **codev 모드**(`chCfg.debate.codev: true`)면 위 사이클이 끝난 뒤 `finalizeCodev` 실행 — 아래 [codev 모드] 참고.
+1. [이게 뭘 하는 물건인가](#이게-뭘-하는-물건인가)
+2. [어디서 동작하나 (실행 환경)](#어디서-동작하나-실행-환경)
+3. [설치 전 준비물](#설치-전-준비물)
+4. [설치 순서](#설치-순서)
+5. [Discord 봇 3개 만들기](#discord-봇-3개-만들기)
+6. [LLM CLI 설치 및 로그인](#llm-cli-설치-및-로그인)
+7. [프로젝트 설정 (config.json)](#프로젝트-설정-configjson)
+8. [실행](#실행)
+9. [사용법 (명령어)](#사용법-명령어)
+10. [debate 파이프라인 상세](#debate-파이프라인-상세)
+11. [codev 모드 (동시 개발)](#codev-모드-동시-개발)
+12. [부가 기능](#부가-기능)
+13. [로그 파일](#로그-파일)
+14. [트러블슈팅](#트러블슈팅)
+15. [보안 주의사항](#보안-주의사항)
 
-모든 라운드/투표/채택 결과는 `appendDecisionLog`로 `logs/*-decisions.jsonl`에 기록됩니다.
+---
 
-## codev 모드 (동시 개발)
+## 이게 뭘 하는 물건인가
 
-`config.json`의 해당 채널 `debate.codev`를 `true`로 켜면, reviewer가 "검토만" 하지 않고 **owner와 같은 작업 디렉터리(`chCfg.cwd[owner]`)를 공유해서 실제 파일을 직접 고칩니다**.
+로컬 PC에 설치된 AI 코딩 CLI(Claude Code, Codex, Google Antigravity/Gemini)를 각각 "봇"으로 만들어 Discord 채널 하나에 초대합니다. Discord 채널에 질문이나 작업 지시를 올리면:
 
-- reviewer 프롬프트가 review 전용 문구 대신 "직접 문제 파일을 열어서 고쳐라" 지시로 바뀝니다.
-  - 고칠 게 없으면 `STATUS: APPROVE`.
-  - 고쳤으면 `STATUS: REVISE` + 파일:라인 단위로 뭘 고쳤는지 요약.
-- owner는 reviewer가 고친 내용을 확인하고 남은 작업을 이어가거나 요약만 남깁니다.
-- 사이클 종료 후 `finalizeCodev`가 자동 실행됩니다:
-  1. moderator 중 첫 번째(`moderatorKeys[0]`)가 전체 작업을 한 문단 요약 + `COMMIT: <메시지>` 형식으로 커밋 메시지 생성.
-  2. owner의 작업 디렉터리에서 `git add -A && git commit -m "<메시지>"` 자동 실행(`gitCommit`).
-  3. **push는 자동으로 하지 않음** — 커밋 결과와 함께 `!push` 안내 메시지를 채널에 남기고, 사용자가 직접 `!push`를 입력해야 실제 push가 나갑니다.
-- `!push` 명령은 `chCfg.debate.owner`로 지정된 봇의 클라이언트에서만 처리(중복 push 방지)하며, 해당 봇의 작업 디렉터리에서 `git push` 실행 결과를 답장으로 알려줍니다.
+- **기본(debate) 모드**: 한 봇(owner)이 초안을 작성 → 다른 봇(reviewer)이 검토 → 의견 안 맞으면 세 번째 봇(moderator)이 다수결로 최종안을 정합니다. 즉, **PC 앞에 안 앉아 있어도 스마트폰 Discord 앱으로 여러 AI가 서로 검토한 결과물을 받아볼 수 있습니다.**
+- **codev 모드**: 검토자가 말로만 지적하지 않고 같은 작업 폴더에서 파일을 직접 고쳐줍니다. 끝나면 자동으로 git commit까지 해줍니다(push는 사람이 확인 후 직접).
+- **1:1 모드**: 특정 봇만 콕 집어 평범한 챗봇처럼 대화할 수도 있습니다.
+- **사용량 가드**: 봇 하나가 API 한도를 다 써가면 자동으로 다른 봇에게 역할을 넘겨줍니다(선택 기능).
 
-## 명령어 목록
+## 어디서 동작하나 (실행 환경)
 
-| 명령어 | 설명 |
+- **로컬 PC(또는 항상 켜져 있는 서버) 1대**에서 Node.js 프로세스 하나(`bridge.js`)가 계속 떠 있어야 합니다. Discord 서버(디스코드 클라우드)에 뭘 설치하는 게 아니라, **내 컴퓨터가 Discord와 계속 연결을 유지하면서 메시지를 감시**하는 방식입니다 → 이 프로세스가 꺼지면 봇도 오프라인이 됩니다.
+- 개발/테스트는 **Windows 10/11**에서 이루어졌고(`run-hidden.vbs` 포함), Node.js가 도는 환경이면 macOS/Linux/WSL에서도 동일하게 동작합니다.
+- 브릿지가 실행하는 각 LLM CLI(`claude`, `codex`, `agy`)는 **그 PC에 미리 설치되어 로그인까지 끝나 있어야** 합니다 — 브릿지 자체는 API 키를 직접 다루지 않고, 이미 인증된 CLI를 그대로 실행만 시켜줍니다.
+- 각 봇이 작업할 **코드 프로젝트 폴더(`cwd`)** 도 같은 PC 안에 있어야 합니다. CLI가 그 폴더로 이동해서 실제로 파일을 읽고 씁니다.
+
+## 설치 전 준비물
+
+| 항목 | 왜 필요한가 |
 |---|---|
-| `!quick <질문>` | debate 건너뛰고 각 봇이 독립적으로 즉시 답변 |
-| `!help` | 사용 가능한 명령어 안내 (대표 봇 1개만 응답, turn 정리 대상 제외) |
-| `!usage` | 봇별 사용량 잔량(%) 확인 (`usageGuard` 꺼져 있으면 안내만) |
-| `!push` | codev 모드에서 자동 커밋된 변경사항을 실제로 push (owner 봇 채널에서만 동작) |
-| `!stop` / `!start` / `!restart` | 봇 실행 중단 / 재개 / 세션(대화 컨텍스트) 초기화 |
-| `클로드:`, `코덱스:` 등 별명 접두어, `@멘션` | 특정 봇 1:1 지목 대화 |
+| **Node.js 18 이상** (테스트: v24) | `bridge.js`를 실행하는 런타임. `discord.js` 라이브러리가 최신 Node 기능을 씀 |
+| **Discord 계정 + 서버(길드) 관리 권한** | 봇을 만들고 초대하려면 해당 서버에 "채널 관리/멤버 초대" 권한이 있는 계정이어야 함 |
+| **Claude Code CLI** (`claude`) | owner/reviewer/moderator 중 하나로 쓸 LLM. [claude.com/code](https://claude.com/product/claude-code) 참고 |
+| **Codex CLI** (`codex`) | 위와 동일, OpenAI Codex CLI |
+| **Antigravity / Gemini CLI** (`agy`) | 위와 동일, Google Antigravity(Gemini) CLI |
+| **git** | codev 모드의 자동 커밋/`!push` 기능이 각 봇의 작업 폴더에서 `git` 명령을 그대로 실행함 |
+| (선택) **Python 3** | `usage-coach`의 `coach.py`로 사용량 가드를 쓸 때만 필요 |
 
-## 기능
+> CLI 3개를 다 안 써도 됩니다. 봇 1~2개만 등록하고 `config.json`에서 안 쓰는 항목을 지워도 동작합니다. 다만 **debate 모드는 owner/reviewer 최소 2개**가 필요합니다.
 
-- **codev 모드**: reviewer가 검토만 하는 게 아니라 owner와 같은 cwd에서 실제 파일을 직접 고치는 동시개발 모드. 종료 시 moderator가 요약+커밋 메시지 생성 후 자동 `git commit`, 실제 push는 `!push`로 사용자 확인 후 실행.
-- **세션 제어**: `!stop`, `!start`, `!restart` (+ 특정 봇 alias)로 봇 실행 중단/초기화.
-- **명령어 안내**: `!help`로 사용 가능한 명령어 목록을 봇이 직접 올림. 사람이 보낸 일반 메시지와
-  달리 `clearChannelSessions`가 정리하지 않으니 계속 남아있고, 필요하면 디스코드에서 직접 고정(핀) 가능.
-- **일일 사용량 가드**: `settings.usageDailyLimit` 기준으로 봇별 호출 횟수를 `logs/usage-counts.json`에 누적, 자정에 리셋. `usageWarnRatio` 넘으면 경고.
-- **결정 로그**: debate 라운드, moderator 투표, 최종 채택 결과를 `logs/*-decisions.jsonl`에 append-only로 기록 (감사 추적용).
-- **핀 고정 상태 메시지**: 작업 중/완료/소요 시간을 채널에 실시간 업데이트.
-- **usage-coach 웹훅**: `scripts/create-webhooks.js`로 채널별 사용량 알림용 웹훅 생성.
-- **사용량 가드(자동 역할 교체)**: `usage-coach`의 `coach.py --json --once`를 조회해서 봇 사용량이
-  임계치(기본 30%) 밑이면 debate의 owner/reviewer/moderator 역할을 여유 있는 다른 봇으로 자동 교체.
-  특정 봇을 직접 지목(`c:`, `@멘션`, `!quick`)한 경우엔 교체 대신 경고만 답변에 붙음. 자세한 설정은
-  아래 `settings.usageGuard` 참고, `!usage`로 현재 잔량 확인 가능.
-
-## 설치
+## 설치 순서
 
 ```bash
+git clone <이 저장소 URL>
+cd Discordchat
 npm install
 cp .env.example .env
 ```
 
-`.env`에 각 봇의 Discord 봇 토큰을 채웁니다:
+`npm install`이 설치하는 것:
+- **discord.js** — Discord 봇 계정으로 로그인하고 메시지를 주고받는 공식 라이브러리(이게 없으면 Discord와 통신 자체가 불가능).
+- **dotenv** — `.env` 파일에 적어둔 토큰 같은 비밀값을 `process.env`로 읽어오는 라이브러리(토큰을 코드에 하드코딩하지 않기 위함).
+
+## Discord 봇 3개 만들기
+
+브릿지에 등록할 각 LLM(claude/codex/agy)마다 **별도의 Discord 봇 계정**이 하나씩 필요합니다(구분해서 말하려면 이름/아이콘이 달라야 하니까). 아래 과정을 **봇 개수만큼 반복**합니다.
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) 접속 → 로그인 → **New Application** → 이름 입력(예: `claude-bot`).
+2. 왼쪽 메뉴 **Bot** 탭 → **Reset Token**(또는 최초 생성 시 바로 보이는 토큰) → **토큰 복사**. 이 값을 `.env`의 `DISCORD_TOKEN_CLAUDE`(또는 해당 봇 변수)에 붙여넣습니다. **토큰은 딱 한 번만 보여줍니다.**
+3. 같은 **Bot** 탭에서 **Privileged Gateway Intents** 중 **MESSAGE CONTENT INTENT**를 켭니다(이게 꺼져 있으면 봇이 메시지 내용을 아예 못 읽습니다).
+4. 왼쪽 메뉴 **OAuth2 → URL Generator**:
+   - **Scopes**: `bot` 체크.
+   - **Bot Permissions**: 최소 `Read Messages/View Channels`, `Send Messages`, `Read Message History` (메시지 핀 고정 기능까지 쓰려면 `Manage Messages`도 체크).
+   - 생성된 URL을 브라우저에 열고, 봇을 초대할 서버를 선택 → 권한 승인.
+5. 이제 이 봇이 서버 멤버 목록에 오프라인 상태로 보이면 정상입니다(브릿지를 실행하면 온라인으로 바뀝니다).
+6. `codex`, `agy` 봇도 1~5번을 반복하고 각각 `.env`의 `DISCORD_TOKEN_CODEX`, `DISCORD_TOKEN_AGY`에 채웁니다.
+7. 봇들을 대화시킬 채널의 **채널 ID**를 얻습니다: Discord 앱에서 **설정 → 고급 → 개발자 모드** 켜기 → 채널 우클릭 → **ID 복사**. 이 값이 `config.json`의 `channels[].id`에 들어갑니다.
+
+`.env` 최종 형태:
 
 ```
-DISCORD_TOKEN_CLAUDE=...
-DISCORD_TOKEN_CODEX=...
-DISCORD_TOKEN_AGY=...
+DISCORD_TOKEN_CLAUDE=여기에_claude_봇_토큰
+DISCORD_TOKEN_CODEX=여기에_codex_봇_토큰
+DISCORD_TOKEN_AGY=여기에_agy_봇_토큰
 ```
 
-`config.json`에서 채널 ID, 각 봇의 작업 디렉터리(`cwd`), CLI 실행 경로(`command`)를 환경에 맞게 수정합니다.
+## LLM CLI 설치 및 로그인
+
+브릿지는 각 CLI를 `child_process`로 그냥 실행만 합니다(`claude -p "..."`, `codex exec "..."`, `agy --print "..."` 형태). 그러니 **브릿지를 켜기 전에 터미널에서 CLI가 단독으로 동작하는지부터 확인**하세요.
+
+1. 각 CLI를 공식 문서대로 설치합니다(설치 경로는 OS/버전마다 다르므로 최신 설치 가이드를 따르세요).
+2. 설치 후 **로그인/인증을 CLI 자체 기능으로 1회 완료**합니다(예: `claude` 실행 후 브라우저 로그인 플로우, `codex login` 등). 브릿지는 이 로그인 세션을 그대로 재사용하며, 토큰이나 API 키를 별도로 넘기지 않습니다.
+3. 터미널에서 아무 프로젝트 폴더로 이동해 CLI가 정상 응답하는지 확인:
+   ```bash
+   claude -p "hello"
+   codex exec "hello"
+   agy --print "hello"
+   ```
+4. 정상 응답이 오면, 그 실행 파일의 **전체 경로**를 확인해 `config.json`의 `bots[].command`에 넣습니다.
+   - Windows: `where claude`, `where codex`, `where agy`
+   - macOS/Linux: `which claude` 등
+
+## 프로젝트 설정 (`config.json`)
+
+레포에 들어있는 `config.json`은 **예시/개인 환경 값**이 채워진 샘플입니다. 저장소를 그대로 쓰지 말고, 아래 표를 참고해 **본인 PC 경로 / 본인 채널 ID / 본인 CLI 경로**로 전부 바꾸세요.
+
+```json
+{
+  "channels": [
+    {
+      "id": "여기에 디스코드 채널 ID",
+      "name": "임의 이름(로그 구분용)",
+      "cwd": {
+        "claude": "이 봇이 작업할 프로젝트 폴더 경로",
+        "codex": "reviewer 봇이 작업할 폴더 경로 (codev면 owner와 별도 워크트리 권장)",
+        "agy": "moderator 봇 폴더 경로"
+      },
+      "debate": { "owner": "claude", "reviewer": "codex", "moderators": ["agy"], "maxRounds": 3, "codev": false }
+    }
+  ],
+  "bots": [
+    { "key": "claude", "tokenEnv": "DISCORD_TOKEN_CLAUDE", "aliases": ["claude", "c"], "command": "claude 실행파일 전체 경로", "args": [] }
+  ],
+  "settings": { "...": "아래 표 참고" }
+}
+```
+
+| 필드 | 설명 |
+|---|---|
+| `channels[].id` | 대상 Discord 채널 ID (숫자 문자열) |
+| `channels[].name` | 로그에 찍히는 구분용 이름, 아무 문자열이나 가능 |
+| `channels[].cwd` | 봇 키별 작업 디렉터리(각 CLI가 그 경로로 이동해서 실행됨). **codev 모드**를 쓰려면 owner/reviewer가 같은 git 저장소를 봐야 충돌이 안 나므로, reviewer 폴더를 `git worktree`로 따로 파는 걸 권장 |
+| `channels[].debate.owner` | 초안을 작성하는 봇 키 |
+| `channels[].debate.reviewer` | 검토(또는 codev면 직접 수정)하는 봇 키 |
+| `channels[].debate.moderators` | 동률/미합의 시 다수결 투표할 봇 키 배열 (1개 이상) |
+| `channels[].debate.maxRounds` | owner↔reviewer 왕복 최대 횟수 |
+| `channels[].debate.codev` | `true`면 reviewer가 owner cwd 공유해서 파일 직접 수정 + 종료 시 자동 커밋 ([codev 모드](#codev-모드-동시-개발) 참고). 기본 `false`(리뷰 코멘트만) |
+| `bots[].key` | 채널의 `owner`/`reviewer`/`moderators`, `cwd`에서 참조하는 고유 키 |
+| `bots[].tokenEnv` | 이 봇 토큰이 담긴 `.env` 변수 이름 |
+| `bots[].aliases` | 채팅에서 `별명:` 형태로 이 봇만 지목할 때 쓰는 접두어 목록 |
+| `bots[].command` | 실행할 CLI 실행 파일의 **전체 경로** |
+| `bots[].args` | CLI 실행 시 항상 붙일 고정 인자(모델 지정 등) |
+| `settings.maxMessageLength` | Discord 메시지 하나의 최대 글자 수로 답변을 자름(디스코드 제한 2000자 이하로) |
+| `settings.execTimeoutMs` | 봇 CLI 호출 1회당 최대 대기 시간(ms) |
+| `settings.approvalTimeoutMs` | (승인 대기 관련 내부 타임아웃) |
+| `settings.usageDailyLimit` / `usageWarnRatio` | 봇별 일일 호출 한도 및 경고 비율(80% 등) |
+| `settings.usageGuard.*` | 사용량 낮은 봇을 자동으로 다른 봇으로 교체하는 기능 설정. [부가 기능](#부가-기능) 참고, 기본 `enabled: false` |
 
 ## 실행
 
 ```bash
 node bridge.js
+# 또는
+npm start
 ```
 
-Windows에서 콘솔 창 없이 백그라운드로 띄우려면 `run-hidden.vbs`를 더블클릭하거나 스케줄러에 등록하세요. 로그는 `logs/bridge-stdout.log`, `logs/bridge-stderr.log`에 쌓입니다.
+정상 기동 시 콘솔에 각 봇의 로그인 완료 로그가 찍히고, Discord 상에서 등록한 봇 3개가 온라인으로 표시됩니다.
 
-## 설정 (`config.json`)
+**Windows에서 창 없이 백그라운드로 띄우기**: `run-hidden.vbs`를 더블클릭하거나 작업 스케줄러(로그온 시 실행)에 등록하면 콘솔 창 없이 실행되고, 표준출력/에러가 `logs/bridge-stdout.log`, `logs/bridge-stderr.log`에 쌓입니다. 경로가 다르면 `run-hidden.vbs` 안의 `cd /d D:\Discordchat` 부분을 본인 설치 경로로 수정하세요.
 
-| 필드 | 설명 |
+**macOS/Linux에서 계속 띄워두기**: `pm2`, `systemd` 서비스, `nohup node bridge.js &`, `tmux`/`screen` 등 원하는 방식으로 상시 실행하면 됩니다(이 저장소엔 별도 스크립트가 없으니 환경에 맞는 방법을 쓰세요).
+
+## 사용법 (명령어)
+
+Discord 채널에서 아래처럼 입력합니다.
+
+| 입력 예 | 동작 |
 |---|---|
-| `channels[].id` | 대상 Discord 채널 ID |
-| `channels[].cwd` | 봇별 작업 디렉터리(각 CLI가 실행될 경로) |
-| `channels[].debate` | `owner`(초안 작성), `reviewer`(검토), `moderators`(동률 시 다수결 패널), `maxRounds`, `codev`(true면 reviewer가 owner cwd 공유해서 직접 파일 수정 + 완료 시 자동 커밋, [codev 모드] 참고) |
-| `bots[].tokenEnv` | 해당 봇 토큰이 담긴 환경변수 이름 |
-| `bots[].aliases` | 채팅에서 이 봇을 지목할 때 쓰는 접두어 |
-| `bots[].command` / `args` | 실행할 CLI 경로와 고정 인자 |
-| `settings.execTimeoutMs` | 봇 CLI 호출 타임아웃 |
-| `settings.usageDailyLimit` / `usageWarnRatio` | 일일 호출 한도 및 경고 임계치 |
-| `settings.usageGuard.enabled` | 사용량 가드 켜기/끄기 (기본 꺼짐) |
-| `settings.usageGuard.pythonCommand` / `coachScript` | `coach.py` 실행할 파이썬 경로 / `coach.py` 절대경로 |
-| `settings.usageGuard.threshold` | 이 % 미만이면 "낮음"으로 판단(기본 30) — 봇의 여러 윈도우(5h/7d/1d 등) 중 최소값 기준 |
-| `settings.usageGuard.action` | `"handoff"`(기본, 다른 봇으로 자동 교체) 또는 `"stop"`(교체할 봇도 없으면 작업 보류) |
-| `settings.usageGuard.providerMap` | 봇 키(`claude`/`codex`/`agy`) → coach.py provider 이름(`claude`/`codex`/`antigravity`) 매핑 |
-| `settings.usageGuard.fallbackOrder` | 교체 시도 우선순위 |
+| `이 함수 버그 좀 찾아줘` (그냥 평문) | debate 모드 시작: owner 초안 → reviewer 검토 → (필요시) moderator 다수결 |
+| `!quick 오늘 날짜가 몇이야?` | debate 없이 등록된 봇들이 각자 독립적으로 즉시 답변 |
+| `claude: 이거 어떻게 생각해?` / `c: ...` | `claude` 봇만 지목해 1:1 대화 (별명은 `config.json`의 `aliases` 기준) |
+| `@봇이름 ...` | 멘션으로 특정 봇 지목 |
+| `!help` | 사용 가능한 명령어 안내 |
+| `!usage` | 봇별 사용량 잔량(%) 확인 (`usageGuard` 꺼져 있으면 안내만 뜸) |
+| `!push` | codev 모드에서 자동 커밋된 변경사항을 실제로 `git push` (owner 봇 채널에서만 동작) |
+| `!stop` | 해당(또는 전체) 봇 실행 중단 |
+| `!start` | 중단된 봇 재개 |
+| `!restart` | 세션(대화 컨텍스트) 초기화 |
 
-사용량 가드는 `coach.py --json --once` 조회 결과(`{"providers": {...}}`)를 60초(`checkIntervalMs`) 캐시로
-읽습니다. 조회 실패/미설정 시에는 항상 "정상"으로 간주해 평소처럼 동작합니다(페일 오픈). 활성화하려면
-`enabled: true`로 바꾸고, `pythonCommand`/`coachScript`를 실제 실행 환경에 맞춰 조정하세요(WSL/Linux면
-보통 `python3` + `~/usage-coach/coach.py`, Windows 네이티브면 `python` 또는 `python.exe` 전체 경로 +
-`D:\usage-coach\coach.py`처럼). `!usage`로 봇별 잔량을 바로 확인할 수 있습니다.
+## debate 파이프라인 상세
 
-## 주의
+1. **owner 초안**: `cwd[owner]` 경로에서 owner CLI가 사용자 프롬프트로 초안 작성.
+2. **reviewer 검토 라운드** (최대 `maxRounds`회 반복):
+   - reviewer가 초안을 보고 `STATUS: APPROVE`(승인) 또는 `STATUS: REVISE` + 구체적 수정 지시를 반환.
+   - `APPROVE`면 즉시 라운드 종료. `REVISE`면 owner가 피드백 반영해 재작성 후 다음 라운드.
+   - 마지막 라운드까지 `REVISE`면 owner 재작성 없이 바로 moderator 패널로 넘어감.
+3. **moderator 패널** (APPROVE로 안 끝났을 때만): 각 moderator가 "초안 유지" vs "reviewer 재작성 채택" 중 하나에 투표, 다수결로 최종안 확정. 채택 결과는 `⭐ 최종 채택` 메시지로 안내.
+4. **codev 모드**(`debate.codev: true`)면 위 사이클이 끝난 뒤 자동으로 커밋 단계로 이어짐 — 아래 참고.
 
-- `.env`는 절대 커밋하지 마세요 (`.gitignore`에 포함됨).
-- 모든 봇 CLI가 승인 프롬프트 없이(`--dangerously-*`) 실행되므로, 신뢰할 수 없는 입력이 흘러들 수 있는 채널에는 연결하지 마세요.
+모든 라운드/투표/채택 결과는 `logs/*-decisions.jsonl`에 append-only로 기록됩니다(감사 추적용).
+
+## codev 모드 (동시 개발)
+
+`config.json`의 해당 채널 `debate.codev`를 `true`로 켜면, reviewer가 "말로 검토만" 하지 않고 **owner와 같은 작업 디렉터리를 공유해서 실제 파일을 직접 고칩니다**.
+
+- reviewer 프롬프트가 review 전용 문구 대신 "직접 문제 파일을 열어서 고쳐라" 지시로 바뀝니다.
+  - 고칠 게 없으면 `STATUS: APPROVE`.
+  - 고쳤으면 `STATUS: REVISE` + 파일:라인 단위로 뭘 고쳤는지 요약.
+- owner는 reviewer가 고친 내용을 확인하고 남은 작업을 이어가거나 요약만 남깁니다.
+- 사이클 종료 후 자동으로 다음이 실행됩니다:
+  1. moderator 중 첫 번째가 전체 작업을 한 문단으로 요약 + `COMMIT: <메시지>` 형식으로 커밋 메시지 생성.
+  2. owner의 작업 디렉터리에서 `git add -A && git commit -m "<메시지>"` 자동 실행.
+  3. **push는 자동으로 하지 않습니다** — 커밋 결과와 함께 `!push` 안내 메시지를 채널에 남기고, 사람이 직접 `!push`를 입력해야 실제 push가 나갑니다.
+- `!push`는 `debate.owner`로 지정된 봇의 클라이언트에서만 처리되며(중복 push 방지), 해당 봇의 작업 디렉터리에서 `git push` 결과를 답장으로 알려줍니다.
+
+> codev를 켤 채널의 reviewer `cwd`는 owner와 **같은 저장소를 보는 별도 워크트리**(`git worktree add`)로 두는 걸 권장합니다. 완전히 다른 저장소를 넣으면 파일을 서로 못 찾습니다.
+
+## 부가 기능
+
+- **세션 제어**: `!stop`, `!start`, `!restart`(+ 특정 봇 alias 접두)로 봇 실행 중단/재개/초기화.
+- **명령어 안내**: `!help`로 사용 가능한 명령어 목록을 대표 봇 하나만 채널에 올림(자동 정리 대상에서 제외되므로 계속 남아있고, 필요하면 디스코드에서 직접 핀 고정 가능).
+- **일일 사용량 가드**: `settings.usageDailyLimit` 기준으로 봇별 호출 횟수를 `logs/usage-counts.json`에 누적, 자정에 리셋. `usageWarnRatio` 넘으면 경고.
+- **결정 로그**: debate 라운드, moderator 투표, 최종 채택, codev 커밋 결과를 `logs/*-decisions.jsonl`에 기록.
+- **핀 고정 상태 메시지**: 작업 중/완료/소요 시간을 채널 메시지로 실시간 업데이트.
+- **usage-coach 웹훅**: `scripts/create-webhooks.js`로 채널별 사용량 알림용 Discord 웹훅을 생성.
+- **사용량 가드(자동 역할 교체)**: 별도 프로젝트 `usage-coach`의 `coach.py --json --once` 출력을 조회해서 봇 사용량이 임계치(기본 30%) 밑이면 debate의 owner/reviewer/moderator 역할을 여유 있는 다른 봇으로 자동 교체합니다. 특정 봇을 직접 지목(별명/`@멘션`/`!quick`)한 경우엔 교체 대신 경고만 답변에 붙습니다.
+  - 켜려면 `settings.usageGuard.enabled: true` + `pythonCommand`/`coachScript`를 본인 환경 경로로 수정(WSL/Linux는 보통 `python3` + `coach.py` 절대경로, Windows 네이티브는 `python` 또는 `python.exe` 전체 경로).
+  - 조회 실패/미설정 시엔 항상 "정상"으로 간주해 평소처럼 동작합니다(페일 오픈).
+  - `!usage`로 봇별 현재 잔량을 바로 확인 가능.
+
+## 로그 파일
+
+모두 `logs/` 아래(레포엔 커밋 안 됨, `.gitignore` 처리):
+
+| 파일 | 내용 |
+|---|---|
+| `bridge-stdout.log` / `bridge-stderr.log` | `run-hidden.vbs`로 실행했을 때의 표준출력/에러 |
+| `usage-counts.json` | 봇별 일일 호출 횟수 누적치 |
+| `*-decisions.jsonl` | 채널별 debate 라운드/투표/채택/codev 커밋 결정 이력 (한 줄에 JSON 하나) |
+
+## 트러블슈팅
+
+| 증상 | 확인할 것 |
+|---|---|
+| 봇이 Discord에서 계속 오프라인 | `.env`에 정확한 토큰 넣었는지, 서버에 실제로 초대했는지 |
+| 봇은 온라인인데 메시지에 반응 없음 | Developer Portal에서 **MESSAGE CONTENT INTENT** 켰는지, `config.json`의 채널 `id`가 맞는지 |
+| CLI 호출이 계속 타임아웃 | `settings.execTimeoutMs` 늘리기, 터미널에서 해당 CLI가 단독으로도 그만큼 걸리는지 먼저 확인 |
+| `command not found` 류 에러 | `bots[].command`가 실행 파일 **절대 경로**인지 확인(`where`/`which`로 재확인) |
+| codev 모드에서 커밋이 안 됨 | owner `cwd`가 실제 git 저장소인지, 변경사항이 있었는지(`logs/*-decisions.jsonl`의 `codev_commit` 항목 확인) |
+| `!push` 눌러도 반응 없음 | 그 채널의 `debate.owner` 봇 클라이언트에게 보냈는지(다른 봇에게 보내면 무시됨) |
+| 사용량 가드가 항상 무시됨 | `usageGuard.enabled: true`인지, `pythonCommand`/`coachScript` 경로가 실제로 그 PC에서 실행 가능한지 |
+
+## 보안 주의사항
+
+- `.env`는 절대 커밋하지 마세요(`.gitignore`에 포함됨). 토큰이 유출되면 즉시 Developer Portal에서 **Reset Token**.
+- 모든 봇 CLI가 승인 프롬프트 없이(`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox` 류 플래그) 실행되므로, **본인만 접근 가능한 신뢰된 채널**에만 연결하세요. 아무나 메시지를 보낼 수 있는 서버에 연결하면 임의 코드/명령 실행으로 이어질 수 있습니다.
+- `config.json`을 다른 사람과 공유/커밋할 때 실제 채널 ID, 로컬 파일 경로, CLI 설치 경로가 그대로 노출된다는 점을 인지하세요(토큰 자체는 `.env`에만 있어 별도 보호됨).
 - `logs/`는 로컬 감사 로그이며 커밋 대상에서 제외되어 있습니다.
