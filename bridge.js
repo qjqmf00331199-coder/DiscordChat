@@ -61,6 +61,13 @@ function stripAnsi(str) {
     .replace(/\x1B[@-Z\\-_]/g, '');
 }
 
+// 채널에 디스코드 네이티브 "입력중..." 표시 유지 (sendTyping은 ~10초만 유효하므로 8초마다 재호출)
+function startTyping(channel) {
+  channel.sendTyping().catch(() => {});
+  const timer = setInterval(() => channel.sendTyping().catch(() => {}), 8000);
+  return () => clearInterval(timer);
+}
+
 function chunkText(text, maxLen) {
   const chunks = [];
   let rest = text;
@@ -144,7 +151,9 @@ async function runDebateTurn(sessions, chId, key, cwd, botCfg, prompt) {
   const statusMsg = await session.ensurePinnedStatus();
   const startedAt = Date.now();
   await statusMsg.edit(`⏳ [${key}] 작업 시작함...`).catch(() => {});
+  const stopTyping = startTyping(session.channel);
   const result = await askOnce(botCfg, cwd, prompt, session);
+  stopTyping();
   const totalSec = Math.round((Date.now() - startedAt) / 1000);
   await statusMsg.edit(`✅ [${key}] 완료 (${totalSec}초 소요)`).catch(() => {});
   session.lastAnswerMsgs = await session.send(result.text);
@@ -744,10 +753,12 @@ async function launchBotClient(botCfg) {
           const elapsed = Math.round((Date.now() - startedAt) / 1000);
           statusMsg.edit(`⏳ [${botCfg.key}] 작업 중... (${elapsed}초 경과)`).catch(() => {});
         }, 15000);
+        const stopTyping = startTyping(session.channel);
 
         const text = await session.ask(finalPrompt);
 
         clearInterval(heartbeat);
+        stopTyping();
         const totalSec = Math.round((Date.now() - startedAt) / 1000);
         statusMsg.edit(`✅ [${botCfg.key}] 완료 (${totalSec}초 소요)`).catch(() => {});
 
