@@ -8,6 +8,52 @@ const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 const { channels, bots, settings } = config;
 
+// "!help"로 봇이 직접 올리는 안내문. 사람이 보낸 일반 메시지는 clearChannelSessions가
+// 다음 턴에 자동 삭제하지만, 봇이 보낸 메시지는 그 정리 로직이 건드리지 않아 계속 남는다.
+const HELP_TEXT = `📖 사용 가능한 명령어
+
+【기본 동작 — 아무 접두어 없이 그냥 메시지】
+→ 토론(debate) 모드 자동 실행
+  1) claude(owner)가 초안 작성
+  2) codex(reviewer)가 검토 → 문제없으면 즉시 채택, 문제있으면 수정 지시
+  3) 최대 3라운드 반복해도 합의 안 되면 agy(moderator)가 다수결로 최종 채택
+※ 이전 턴 메시지는 새 메시지 올 때 자동 정리됨 (최신 턴만 채널에 남음)
+
+【!quick <질문>】
+→ 토론 건너뛰고 claude·codex·agy 3명이 각자 독립적으로 즉시 답변
+예) !quick 이 함수 버그 어디 있어?
+
+【특정 봇 한 명만 지목해서 1:1 대화】
+→ 접두어 또는 멘션으로 지목, debate 없이 그 봇만 답변
+  - claude : "클로드:" / "claude:" / "c:"
+  - codex  : "코덱스:" / "codex:" / "x:"
+  - agy    : "agy:" / "a:" / "antigravity:"
+  - 또는 봇 계정 @멘션
+예) c: 여기 이 코드 리팩터링 해줘
+
+【!stop [봇명]】
+→ 해당 봇(생략 시 자신)이 실행 중인 작업 즉시 취소
+예) !stop / !stop codex
+
+【!restart [봇명]】
+→ 해당 봇의 대화 세션(이어가기 컨텍스트) 초기화, 다음 질문부터 새 대화로 시작
+예) !restart / !restart agy
+
+【!start [봇명]】
+→ 안내용(봇은 항상 대기 중이라 실제 동작 없음, 확인 메시지만 응답)
+
+【!usage】
+→ 봇별 실시간 사용량 잔량(%) 확인 (usage-coach 연동 켜져 있을 때만)
+
+【!help】
+→ 이 안내문 다시 보기 (이 메시지는 자동 삭제되지 않으니 디스코드에서 직접 고정해도 됨)
+
+⚙️ 참고
+- 일일 호출 한도: 봇당 100회(자정 리셋), 80% 넘으면 답변에 ⚠️ 경고 포함
+- 한도 초과 시 🚫 메시지로 알려주고 그날은 응답 안 함
+- 작업 중엔 ⏳ 상태 메시지가 15초마다 경과시간 갱신, 끝나면 ✅ 완료(N초)로 표시
+- 사용량 가드 켜져 있으면: 봇 하나가 임계치 밑으로 떨어질 때 debate 역할을 자동으로 다른 봇에게 넘김`;
+
 function stripAnsi(str) {
   return str
     .replace(/\x1B\[[0-9;:<=>?]*[ -\/]*[@-~]/g, '')
@@ -139,8 +185,48 @@ async function runModeratorPanel(moderatorKeys, chCfg, botsByKey, sessions, prom
 // APPROVE 나오면 즉시 종료(라운드 최소화), maxRounds 넘도록 못 정하면 모더레이터 패널이 1회만 개입해서 마무리.
 // codev:true면 reviewer가 review-only 아니라 owner cwd 공유해서 실제 파일을 직접 고침(동시개발).
 async function runDebate(chCfg, botsByKey, sessions, prompt) {
-  const { owner, reviewer, maxRounds, codev } = chCfg.debate;
-  const moderatorKeys = chCfg.debate.moderators || [chCfg.debate.moderator]; // 구설정 호환
+  const { maxRounds, codev } = chCfg.debate;
+  let owner = chCfg.debate.owner;
+  let reviewer = chCfg.debate.reviewer;
+  let moderatorKeys = chCfg.debate.moderators || [chCfg.debate.moderator]; // 구설정 호환
+
+  if (usageGuardCfg.enabled) {
+    const swaps = [];
+    let ok;
+
+    ({ key: owner, found: ok } = await pickAvailableBot(owner, [], botsByKey));
+    if (owner !== chCfg.debate.owner) swaps.push(`owner ${chCfg.debate.owner}→${owner}`);
+    if (!ok && usageGuardCfg.action === 'stop') {
+      await sessions.get(`${chCfg.id}:${owner}`).channel.send(
+        `🚫 사용량 임계치(${usageGuardCfg.threshold}%) 미만 봇뿐이라 작업을 보류합니다. 잠시 후 다시 시도해주세요.`
+      );
+      return;
+    }
+
+    const origReviewer = reviewer;
+    ({ key: reviewer, found: ok } = await pickAvailableBot(reviewer, [owner], botsByKey));
+    if (reviewer !== origReviewer) swaps.push(`reviewer ${origReviewer}→${reviewer}`);
+    if (!ok && usageGuardCfg.action === 'stop') {
+      await sessions.get(`${chCfg.id}:${owner}`).channel.send(
+        `🚫 사용량 임계치(${usageGuardCfg.threshold}%) 미만 봇뿐이라 작업을 보류합니다. 잠시 후 다시 시도해주세요.`
+      );
+      return;
+    }
+
+    const newModerators = [];
+    for (const m of moderatorKeys) {
+      const { key: mKey } = await pickAvailableBot(m, [owner, reviewer], botsByKey);
+      if (mKey !== m) swaps.push(`moderator ${m}→${mKey}`);
+      newModerators.push(mKey);
+    }
+    moderatorKeys = newModerators;
+
+    if (swaps.length) {
+      appendDecisionLog(chCfg, 'usage_guard_swap', { swaps });
+      await sessions.get(`${chCfg.id}:${owner}`).channel.send(`🔁 사용량 부족으로 역할 자동 교체: ${swaps.join(', ')}`);
+    }
+  }
+
   const ownerCfg = botsByKey[owner];
   const reviewerCfg = botsByKey[reviewer];
   const reviewerCwd = codev ? chCfg.cwd[owner] : chCfg.cwd[reviewer];
@@ -270,6 +356,87 @@ function checkAndIncrementUsage(botCfg) {
 
   const warnRatio = settings.usageWarnRatio || 0.8;
   return { allowed: true, used: used + 1, limit, warn: (used + 1) / limit >= warnRatio };
+}
+
+// 사용량 가드: coach.py(usage-coach)를 실시간 조회해서 임계치 미만 봇은
+// debate 역할에서 자동 제외/교체하거나(action:"handoff"), 전부 낮으면 보류(action:"stop").
+// coach.py 경로 미설정/조회 실패 시엔 항상 "정상"으로 취급(페일 오픈) — 이 가드 때문에
+// 평소 동작이 막히면 안 됨.
+const usageGuardCfg = settings.usageGuard || { enabled: false };
+let usageCache = { ts: 0, payload: null };
+let usageFetchPromise = null;
+
+function fetchUsagePayload() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let child;
+    try {
+      child = spawn(usageGuardCfg.pythonCommand || 'python3', [usageGuardCfg.coachScript, '--json', '--once'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      done(null);
+      return;
+    }
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => done(null));
+    child.on('close', (code) => {
+      if (code !== 0 || !out.trim()) { done(null); return; }
+      try { done(JSON.parse(out)); } catch (e) { done(null); }
+    });
+    setTimeout(() => { try { child.kill(); } catch (e) { /* no-op */ } done(null); }, 30000);
+  });
+}
+
+// 60초(checkIntervalMs) 캐시 + 동시 호출 dedupe (매 메시지마다 3개 봇 클라이언트가 각자 부르므로)
+async function getUsageSnapshot() {
+  if (!usageGuardCfg.enabled) return null;
+  const now = Date.now();
+  if (usageCache.payload && now - usageCache.ts < (usageGuardCfg.checkIntervalMs || 60000)) {
+    return usageCache.payload;
+  }
+  if (!usageFetchPromise) {
+    usageFetchPromise = fetchUsagePayload().then((payload) => {
+      usageCache = { ts: Date.now(), payload };
+      usageFetchPromise = null;
+      return payload;
+    });
+  }
+  return usageFetchPromise;
+}
+
+// provider의 여러 윈도우(5h/7d/1d 등) 중 가장 빡빡한(잔량 최소) % — 하나라도 임계치 밑이면 위험 취급
+function minLeftPct(providerEntry) {
+  if (!providerEntry || !providerEntry.ok || !providerEntry.windows) return null;
+  const pcts = Object.values(providerEntry.windows)
+    .map((w) => w.left_pct)
+    .filter((p) => typeof p === 'number');
+  return pcts.length ? Math.min(...pcts) : null;
+}
+
+async function botUsagePct(botKey) {
+  const payload = await getUsageSnapshot();
+  if (!payload) return null;
+  const provKey = (usageGuardCfg.providerMap || {})[botKey] || botKey;
+  return minLeftPct(payload.providers && payload.providers[provKey]);
+}
+
+async function isBotLow(botKey) {
+  const pct = await botUsagePct(botKey);
+  return pct !== null && pct < (usageGuardCfg.threshold ?? 30);
+}
+
+// preferredKey부터 fallbackOrder 순으로 훑어 임계치 이상인 첫 봇을 고른다.
+// 전부 낮으면 found:false와 함께 원래 봇을 그대로 반환(호출부가 stop/handoff 여부 결정).
+async function pickAvailableBot(preferredKey, excluded, botsByKey) {
+  const order = [preferredKey, ...(usageGuardCfg.fallbackOrder || []).filter((k) => k !== preferredKey)];
+  for (const key of order) {
+    if (excluded.includes(key) || !botsByKey[key]) continue;
+    if (!(await isBotLow(key))) return { key, found: true };
+  }
+  return { key: preferredKey, found: false };
 }
 
 function runCli(botCfg, cwd, prompt, hasSession, session) {
@@ -531,6 +698,31 @@ async function launchBotClient(botCfg) {
       return;
     }
 
+    if (/^!help$/i.test(cleaned.trim())) {
+      // 클라이언트 3개가 같은 메시지를 각자 받으므로, 하나만 올리게 대표 봇(첫 설정 봇)만 응답.
+      // channel.send로 직접 보내고 session/lastAnswerMsgs엔 안 담아서 turn 정리 대상이 안 됨.
+      if (botCfg.key === bots[0].key) {
+        for (const chunk of chunkText(HELP_TEXT, settings.maxMessageLength)) {
+          message.channel.send(chunk).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    if (/^!usage$/i.test(cleaned.trim())) {
+      (async () => {
+        const pct = await botUsagePct(botCfg.key);
+        if (!usageGuardCfg.enabled) {
+          message.reply(`[${botCfg.key}] 사용량 가드 꺼져 있음 (config.json settings.usageGuard.enabled)`);
+        } else if (pct === null) {
+          message.reply(`[${botCfg.key}] 사용량 조회 실패 (coach.py 경로/실행 확인 필요)`);
+        } else {
+          message.reply(`[${botCfg.key}] 최소 잔량 ${pct}% (임계치 ${usageGuardCfg.threshold}%)`);
+        }
+      })();
+      return;
+    }
+
     const quickPrompt = parseQuick(cleaned);
 
     const dispatch = () => {
@@ -559,8 +751,15 @@ async function launchBotClient(botCfg) {
         const totalSec = Math.round((Date.now() - startedAt) / 1000);
         statusMsg.edit(`✅ [${botCfg.key}] 완료 (${totalSec}초 소요)`).catch(() => {});
 
-        session.lastAnswerMsgs = await session.send(text);
-        session.appendLog(finalPrompt, text);
+        // 여기 도달하는 건 항상 이 봇 하나가 직접 답하는 경로(1:1 지목 또는 !quick)라
+        // debate처럼 자동 교체는 안 하고 경고만 붙임(사용자가 이 봇을 직접 호출한 거니까)
+        let finalText = text;
+        if (usageGuardCfg.enabled && (await isBotLow(botCfg.key))) {
+          finalText = `⚠️ [${botCfg.key}] 사용량 임계치(${usageGuardCfg.threshold}%) 미만 — 필요하면 다른 봇으로도 요청해보세요.\n\n${finalText}`;
+        }
+
+        session.lastAnswerMsgs = await session.send(finalText);
+        session.appendLog(finalPrompt, finalText);
       })();
     };
 
