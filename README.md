@@ -20,9 +20,10 @@ Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇�
 10. [debate 파이프라인 상세](#debate-파이프라인-상세)
 11. [codev 모드 (동시 개발)](#codev-모드-동시-개발)
 12. [부가 기능](#부가-기능)
-13. [로그 파일](#로그-파일)
-14. [트러블슈팅](#트러블슈팅)
-15. [보안 주의사항](#보안-주의사항)
+13. [일일 사용량 가드 설치 (WSL Ubuntu)](#일일-사용량-가드-설치-wsl-ubuntu)
+14. [로그 파일](#로그-파일)
+15. [트러블슈팅](#트러블슈팅)
+16. [보안 주의사항](#보안-주의사항)
 
 ---
 
@@ -221,10 +222,97 @@ Discord 채널에서 아래처럼 입력합니다.
 - **결정 로그**: debate 라운드, moderator 투표, 최종 채택, codev 커밋 결과를 `logs/*-decisions.jsonl`에 기록.
 - **핀 고정 상태 메시지**: 작업 중/완료/소요 시간을 채널 메시지로 실시간 업데이트.
 - **usage-coach 웹훅**: `scripts/create-webhooks.js`로 채널별 사용량 알림용 Discord 웹훅을 생성.
-- **사용량 가드(자동 역할 교체)**: 별도 프로젝트 `usage-coach`의 `coach.py --json --once` 출력을 조회해서 봇 사용량이 임계치(기본 30%) 밑이면 debate의 owner/reviewer/moderator 역할을 여유 있는 다른 봇으로 자동 교체합니다. 특정 봇을 직접 지목(별명/`@멘션`/`!quick`)한 경우엔 교체 대신 경고만 답변에 붙습니다.
-  - 켜려면 `settings.usageGuard.enabled: true` + `pythonCommand`/`coachScript`를 본인 환경 경로로 수정(WSL/Linux는 보통 `python3` + `coach.py` 절대경로, Windows 네이티브는 `python` 또는 `python.exe` 전체 경로).
-  - 조회 실패/미설정 시엔 항상 "정상"으로 간주해 평소처럼 동작합니다(페일 오픈).
-  - `!usage`로 봇별 현재 잔량을 바로 확인 가능.
+- **사용량 가드(자동 역할 교체)**: 별도 프로젝트 `usage-coach`의 `coach.py --json --once` 출력을 조회해서 봇 사용량이 임계치(기본 30%) 밑이면 debate의 owner/reviewer/moderator 역할을 여유 있는 다른 봇으로 자동 교체합니다. 특정 봇을 직접 지목(별명/`@멘션`/`!quick`)한 경우엔 교체 대신 경고만 답변에 붙습니다. 설치/설정은 [일일 사용량 가드 설치 (WSL Ubuntu)](#일일-사용량-가드-설치-wsl-ubuntu) 참고, `!usage`로 봇별 현재 잔량을 바로 확인 가능.
+
+## 일일 사용량 가드 설치 (WSL Ubuntu)
+
+`bridge.js`는 `usageGuardCfg.pythonCommand`로 지정한 실행 파일을 `spawn()`으로 **직접** 띄우고, 인자로 `[coachScript, '--json', '--once']`만 넘깁니다(셸을 거치지 않음). 즉 `pythonCommand`는 Windows에서 바로 실행 가능한 명령이어야 하고, `coach.py`가 의존하는 [codexbar](https://github.com/steipete/CodexBar) 등 조회 도구는 리눅스 환경(WSL Ubuntu)에 두는 경우가 많습니다. 아래는 **Windows + WSL2 Ubuntu** 조합으로 `coach.py`를 돌리는 전체 과정입니다.
+
+### 1. WSL2 + Ubuntu 설치
+
+관리자 권한 PowerShell에서:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+- 최초 1회 재부팅이 필요할 수 있습니다.
+- 재부팅 후 Ubuntu 터미널이 자동으로 뜨면 **유닉스 사용자 이름/비밀번호**를 설정합니다(리눅스 계정, Windows 로그인과 별개).
+- 이미 WSL이 깔려 있으면 배포판만 추가: `wsl --install -d Ubuntu` (또는 `wsl --list --online`으로 목록 확인 후 선택).
+- 설치 확인: `wsl -l -v` → `Ubuntu`가 `Running`/`Stopped` 상태로 보이고 VERSION이 `2`인지 확인.
+
+### 2. Ubuntu 안에서 Python 3 및 필수 패키지 설치
+
+WSL Ubuntu 터미널(`wsl` 또는 시작 메뉴의 `Ubuntu`)에서:
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3 python3-pip git
+python3 --version   # 3.10+ 정도면 충분
+```
+
+### 3. usage-coach 클론 및 codexbar 연동
+
+```bash
+cd ~
+git clone https://github.com/netwaif/usage-coach.git
+cd usage-coach
+# coach.py는 표준 라이브러리만 써서 pip install 불필요
+```
+
+`coach.py`는 사용량 데이터를 [codexbar](https://github.com/steipete/CodexBar) CLI에서 읽습니다. codexbar를 WSL Ubuntu 안에 설치하고, 각 LLM 제공자(Claude/Codex/Antigravity) 계정으로 최소 한 번 로그인/연동을 마쳐서 `codexbar --provider claude`(등)이 단독으로 값을 뽑는지 먼저 확인하세요. 배포 방식은 codexbar 저장소의 최신 설치 가이드를 따릅니다.
+
+동작 확인:
+
+```bash
+python3 coach.py --once
+python3 coach.py --json --once   # bridge.js가 실제로 파싱하는 형태
+```
+
+`{"providers": {...}}` 형태의 JSON이 찍히면 정상입니다.
+
+### 4. Windows(bridge.js)에서 WSL 안의 coach.py 호출하기
+
+`bridge.js`는 Windows 프로세스라서 `pythonCommand`에 `python3`만 적으면 **Windows의** `python3`를 찾습니다(WSL 안의 것이 아님). WSL 안에 있는 `coach.py`를 그대로 쓰려면 `wsl.exe`를 통해서 불러야 하는데, `spawn()`이 인자를 셸 없이 그대로 넘기기 때문에 **"명령 하나 + 인자 하나"** 형태로 맞춰야 합니다. 가장 간단한 방법은 **얇은 래퍼 스크립트**를 하나 만들어 그걸 `coachScript` 자리에 넣는 것입니다.
+
+`D:\usage-coach\coach-wsl.cmd` (예시, 실제 사용자명/경로는 본인 환경에 맞게 수정):
+
+```bat
+@echo off
+wsl -d Ubuntu -e python3 /home/<사용자명>/usage-coach/coach.py %*
+```
+
+`config.json`:
+
+```json
+"settings": {
+  "usageGuard": {
+    "enabled": true,
+    "pythonCommand": "D:\\usage-coach\\coach-wsl.cmd",
+    "coachScript": "",
+    "checkIntervalMs": 60000,
+    "threshold": 30,
+    "action": "handoff",
+    "providerMap": { "claude": "claude", "codex": "codex", "agy": "antigravity" },
+    "fallbackOrder": ["claude", "codex", "agy"]
+  }
+}
+```
+
+- `pythonCommand`를 래퍼(`.cmd`) 경로로, `coachScript`는 빈 문자열로 둡니다 — 실제 `--json --once`는 여전히 `spawn()`이 뒤에 붙여주므로 래퍼가 `%*`로 그대로 codexbar/coach.py에 전달합니다.
+- Windows용 `.cmd` 대신 WSL을 아예 안 거치고 싶다면, Python(x86-64용 공식 설치본)을 **Windows에도** 설치해 `pythonCommand: "python"` + `coachScript: "D:\\usage-coach\\coach.py"`처럼 순수 Windows 경로로 돌리는 방법도 있습니다(단, codexbar가 Windows 네이티브로 안 돌면 이 조합은 값이 안 나올 수 있음 — 그럴 때만 WSL 경유가 필요).
+- 래퍼 스크립트가 제대로 동작하는지는 PowerShell/cmd에서 직접 실행해 확인:
+  ```
+  D:\usage-coach\coach-wsl.cmd --json --once
+  ```
+  JSON이 찍혀야 `bridge.js`도 정상 조회합니다.
+
+### 5. 최종 확인
+
+1. `config.json`에서 `usageGuard.enabled: true` 저장.
+2. 브릿지 재시작(`node bridge.js`).
+3. Discord 채널에서 `!usage` 입력 → 봇별 잔량(%)이 나오면 성공.
+4. 조회가 계속 실패하면 페일 오픈이라 평소처럼(가드 없이) 동작하니, 콘솔 로그와 3~4단계를 다시 점검하세요.
 
 ## 로그 파일
 
