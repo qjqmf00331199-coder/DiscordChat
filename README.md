@@ -18,6 +18,10 @@ Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇�
 - **결정 로그**: debate 라운드, moderator 투표, 최종 채택 결과를 `logs/*-decisions.jsonl`에 append-only로 기록 (감사 추적용).
 - **핀 고정 상태 메시지**: 작업 중/완료/소요 시간을 채널에 실시간 업데이트.
 - **usage-coach 웹훅**: `scripts/create-webhooks.js`로 채널별 사용량 알림용 웹훅 생성.
+- **사용량 가드(자동 역할 교체)**: `usage-coach`의 `coach.py --json --once`를 조회해서 봇 사용량이
+  임계치(기본 30%) 밑이면 debate의 owner/reviewer/moderator 역할을 여유 있는 다른 봇으로 자동 교체.
+  특정 봇을 직접 지목(`c:`, `@멘션`, `!quick`)한 경우엔 교체 대신 경고만 답변에 붙음. 자세한 설정은
+  아래 `settings.usageGuard` 참고, `!usage`로 현재 잔량 확인 가능.
 
 ## 설치
 
@@ -56,6 +60,18 @@ Windows에서 콘솔 창 없이 백그라운드로 띄우려면 `run-hidden.vbs`
 | `bots[].command` / `args` | 실행할 CLI 경로와 고정 인자 |
 | `settings.execTimeoutMs` | 봇 CLI 호출 타임아웃 |
 | `settings.usageDailyLimit` / `usageWarnRatio` | 일일 호출 한도 및 경고 임계치 |
+| `settings.usageGuard.enabled` | 사용량 가드 켜기/끄기 (기본 꺼짐) |
+| `settings.usageGuard.pythonCommand` / `coachScript` | `coach.py` 실행할 파이썬 경로 / `coach.py` 절대경로 |
+| `settings.usageGuard.threshold` | 이 % 미만이면 "낮음"으로 판단(기본 30) — 봇의 여러 윈도우(5h/7d/1d 등) 중 최소값 기준 |
+| `settings.usageGuard.action` | `"handoff"`(기본, 다른 봇으로 자동 교체) 또는 `"stop"`(교체할 봇도 없으면 작업 보류) |
+| `settings.usageGuard.providerMap` | 봇 키(`claude`/`codex`/`agy`) → coach.py provider 이름(`claude`/`codex`/`antigravity`) 매핑 |
+| `settings.usageGuard.fallbackOrder` | 교체 시도 우선순위 |
+
+사용량 가드는 `coach.py --json --once` 조회 결과(`{"providers": {...}}`)를 60초(`checkIntervalMs`) 캐시로
+읽습니다. 조회 실패/미설정 시에는 항상 "정상"으로 간주해 평소처럼 동작합니다(페일 오픈). 활성화하려면
+`enabled: true`로 바꾸고, `pythonCommand`/`coachScript`를 실제 실행 환경에 맞춰 조정하세요(WSL/Linux면
+보통 `python3` + `~/usage-coach/coach.py`, Windows 네이티브면 `python` 또는 `python.exe` 전체 경로 +
+`D:\usage-coach\coach.py`처럼). `!usage`로 봇별 잔량을 바로 확인할 수 있습니다.
 
 ## 주의
 
