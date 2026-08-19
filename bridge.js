@@ -125,46 +125,103 @@ async function runModeratorPanel(moderatorKeys, chCfg, botsByKey, sessions, prom
   // 최종 채택 알림은 LLM 호출 없이 순수 디스코드 메시지로만 (토큰 비용 0)
   if (draftVotes >= rewriteVotes.length) {
     appendDecisionLog(chCfg, 'moderator_verdict', { tally, adopted: 'draft' });
-    await sessions.get(`${chCfg.id}:${chCfg.debate.owner}`).channel.send(`⭐ 최종 채택: 초안 그대로 [${tally}]`);
+    const ownerSession = sessions.get(`${chCfg.id}:${chCfg.debate.owner}`);
+    ownerSession.lastAnswerMsgs.push(await ownerSession.channel.send(`⭐ 최종 채택: 초안 그대로 [${tally}]`));
   } else {
     const winner = rewriteVotes[0];
     appendDecisionLog(chCfg, 'moderator_verdict', { tally, adopted: winner.key });
-    await sessions.get(`${chCfg.id}:${winner.key}`).channel.send(`⭐ 최종 채택: [${winner.key}]의 재작성 [${tally}]`);
+    const winnerSession = sessions.get(`${chCfg.id}:${winner.key}`);
+    winnerSession.lastAnswerMsgs.push(await winnerSession.channel.send(`⭐ 최종 채택: [${winner.key}]의 재작성 [${tally}]`));
   }
 }
 
 // owner(초안 작성) <-> reviewer(검토) 순차 릴레이. 매 라운드 직전 결과물만 넘겨서 토큰 누적 방지.
 // APPROVE 나오면 즉시 종료(라운드 최소화), maxRounds 넘도록 못 정하면 모더레이터 패널이 1회만 개입해서 마무리.
+// codev:true면 reviewer가 review-only 아니라 owner cwd 공유해서 실제 파일을 직접 고침(동시개발).
 async function runDebate(chCfg, botsByKey, sessions, prompt) {
-  const { owner, reviewer, maxRounds } = chCfg.debate;
+  const { owner, reviewer, maxRounds, codev } = chCfg.debate;
   const moderatorKeys = chCfg.debate.moderators || [chCfg.debate.moderator]; // 구설정 호환
   const ownerCfg = botsByKey[owner];
   const reviewerCfg = botsByKey[reviewer];
+  const reviewerCwd = codev ? chCfg.cwd[owner] : chCfg.cwd[reviewer];
 
   let draft = await runDebateTurn(sessions, chCfg.id, owner, chCfg.cwd[owner], ownerCfg, prompt);
 
   let review = { status: 'REVISE', feedback: '' };
   let round = 1;
   for (; round <= maxRounds; round++) {
-    const reviewText = await runDebateTurn(
-      sessions, chCfg.id, reviewer, chCfg.cwd[reviewer], reviewerCfg,
-      `요청: ${prompt}\n\n검토 대상 답변:\n${draft}\n\n` +
-      `문제 없으면 첫 줄에 "STATUS: APPROVE"만 적어라. ` +
-      `문제 있으면 첫 줄에 "STATUS: REVISE", 다음 줄부터 구체적 수정 지시만 짧게 적어라. 불필요한 설명 금지.`
-    );
-    review = parseReviewStatus(reviewText);
-    appendDecisionLog(chCfg, 'debate_review', { round, reviewer, status: review.status });
+    const reviewPrompt = codev
+      ? `요청: ${prompt}\n\n${owner}가 작성한 결과:\n${draft}\n\n` +
+        `너는 review만 하지 말고 같은 작업폴더에서 실제 문제 되는 파일을 직접 열어서 고쳐라. ` +
+        `고칠 게 없으면 첫 줄에 "STATUS: APPROVE"만 적어라. ` +
+        `고쳤으면 첫 줄에 "STATUS: REVISE", 다음 줄부터 "이 부분은 이렇게 오류가 있어서 내가 수정했다" 식으로 ` +
+        `파일:라인 단위로 뭘 왜 고쳤는지만 짧게 적어라. 판단 과정 설명 금지.`
+      : `요청: ${prompt}\n\n검토 대상 답변:\n${draft}\n\n` +
+        `문제 없으면 첫 줄에 "STATUS: APPROVE"만 적어라. ` +
+        `문제 있으면 첫 줄에 "STATUS: REVISE", 다음 줄부터 구체적 수정 지시만 짧게 적어라. 불필요한 설명 금지.`;
 
-    if (review.status === 'APPROVE') return;
+    const reviewText = await runDebateTurn(sessions, chCfg.id, reviewer, reviewerCwd, reviewerCfg, reviewPrompt);
+    review = parseReviewStatus(reviewText);
+    appendDecisionLog(chCfg, 'debate_review', { round, reviewer, status: review.status, codev: !!codev });
+
+    if (review.status === 'APPROVE') break;
     if (round === maxRounds) break; // 다음 owner 재작성 없이 바로 모더레이터 패널로
 
     draft = await runDebateTurn(
       sessions, chCfg.id, owner, chCfg.cwd[owner], ownerCfg,
-      `요청: ${prompt}\n\n이전 답변:\n${draft}\n\n리뷰어 피드백:\n${review.feedback}\n\n피드백 반영해서 답변을 개선하라.`
+      codev
+        ? `요청: ${prompt}\n\n리뷰어(${reviewer})가 방금 코드 직접 수정함:\n${review.feedback}\n\n` +
+          `수정 내용 확인하고 남은 작업 있으면 이어서 진행. 없으면 최종 결과 요약만 짧게.`
+        : `요청: ${prompt}\n\n이전 답변:\n${draft}\n\n리뷰어 피드백:\n${review.feedback}\n\n피드백 반영해서 답변을 개선하라.`
     );
   }
 
-  await runModeratorPanel(moderatorKeys, chCfg, botsByKey, sessions, prompt, draft, review.feedback, maxRounds);
+  if (review.status !== 'APPROVE') {
+    await runModeratorPanel(moderatorKeys, chCfg, botsByKey, sessions, prompt, draft, review.feedback, maxRounds);
+  }
+
+  if (codev) await finalizeCodev(chCfg, moderatorKeys, botsByKey, sessions, prompt, draft);
+}
+
+// git add+commit만 실행 (push는 안 함, 별도 "!push" 명령으로 사용자가 직접 확인 후 실행)
+function gitCommit(cwd, message) {
+  return new Promise((resolve) => {
+    const add = spawn('git', ['add', '-A'], { cwd });
+    add.on('close', () => {
+      const commit = spawn('git', ['commit', '-m', message], { cwd });
+      let out = '';
+      commit.stdout.on('data', (d) => { out += d; });
+      commit.stderr.on('data', (d) => { out += d; });
+      commit.on('close', (code) => resolve({ code, out: stripAnsi(out).trim() }));
+    });
+  });
+}
+
+// 토론 끝나면 모더레이터(gemini/agy)가 전체 내용 한 문단 요약 + commit 메시지 뽑아서 커밋까지 자동 실행.
+async function finalizeCodev(chCfg, moderatorKeys, botsByKey, sessions, prompt, draft) {
+  const summarizerKey = moderatorKeys[0];
+  const summarizerCfg = botsByKey[summarizerKey];
+  const ownerKey = chCfg.debate.owner;
+  const ownerCwd = chCfg.cwd[ownerKey];
+  const ownerSession = sessions.get(`${chCfg.id}:${ownerKey}`);
+
+  const summaryText = await runDebateTurn(
+    sessions, chCfg.id, summarizerKey, ownerCwd, summarizerCfg,
+    `요청: ${prompt}\n\n최종 결과:\n${draft}\n\n` +
+    `이 작업 전체를 한 문단으로 요약해라. 마지막 줄에 git commit 메시지 한 줄(제목만, 50자 이내, ` +
+    `conventional commits 형식)을 "COMMIT: <메시지>" 형태로 적어라.`
+  );
+
+  const m = summaryText.match(/COMMIT:\s*(.+)/i);
+  const commitMsg = m ? m[1].trim() : 'chore: codev session update';
+
+  const result = await gitCommit(ownerCwd, commitMsg);
+  appendDecisionLog(chCfg, 'codev_commit', { commitMsg, code: result.code });
+
+  const note = result.code === 0
+    ? `📦 커밋 완료: "${commitMsg}"\npush 하려면 "!push" 입력.`
+    : `⚠️ 커밋 안 됨(변경사항 없거나 오류):\n${result.out.slice(0, 500)}`;
+  ownerSession.lastAnswerMsgs.push(await ownerSession.channel.send(note));
 }
 
 // 봇별로 "비대화형 1회 실행" 커맨드 구성 (TUI 없이 순수 답변 텍스트만 받기 위함)
@@ -458,6 +515,19 @@ async function launchBotClient(botCfg) {
         session.resetSession();
         message.reply(`[${botCfg.key}] 대화 초기화함`);
       }
+      return;
+    }
+
+    if (/^!push$/i.test(cleaned.trim())) {
+      if (!chCfg.debate || botCfg.key !== chCfg.debate.owner) return; // owner 클라이언트만 처리(중복 push 방지)
+      const cwd = chCfg.cwd[botCfg.key];
+      const push = spawn('git', ['push'], { cwd });
+      let out = '';
+      push.stdout.on('data', (d) => { out += d; });
+      push.stderr.on('data', (d) => { out += d; });
+      push.on('close', (code) => {
+        message.reply(`${code === 0 ? '✅ push 완료' : '❌ push 실패'}\n${stripAnsi(out).trim().slice(0, 500)}`);
+      });
       return;
     }
 

@@ -8,7 +8,7 @@
         "codex": "D:\\moon-fragment-hunt\\.worktrees\\codex",
         "agy": "D:\\moon-fragment-hunt\\.worktrees\\agy"
       },
-      "debate": { "owner": "claude", "reviewer": "codex", "moderators": ["agy"], "maxRounds": 3 }
+      "debate": { "owner": "claude", "reviewer": "codex", "moderators": ["agy"], "maxRounds": 3, "codev": true }
     },
     {
       "id": "1539106898677080074",
