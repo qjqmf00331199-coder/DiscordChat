@@ -4,6 +4,48 @@ Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇�
 
 한 줄 요약: **Discord 채팅창 = 여러 AI 코딩 CLI를 동시에 부리는 리모컨.**
 
+## 왜 만들었나
+
+Claude Code, Codex, Antigravity(Gemini)를 각자 터미널에서 따로 켜놓고 같은 질문을 반복 입력하거나, 한 CLI의 답을 복사해서 다른 CLI에 검토시키는 걸 손으로 하고 있었습니다. 문제는 세 가지였습니다.
+
+1. **단일 모델의 답을 그대로 믿기 불안함** — 코드 변경처럼 되돌리기 costly한 작업일수록 "다른 모델이 한 번 더 검토했는지"가 신뢰도를 갈랐습니다.
+2. **PC 앞에 있어야만 CLI를 굴릴 수 있음** — 외출 중에도 Discord 앱으로 작업을 던지고 결과만 받아보고 싶었습니다.
+3. **여러 CLI를 동시에 쓰다 보니 특정 계정의 사용량 한도를 모르고 소진해 작업이 끊기는 일이 반복**됐습니다.
+
+그래서 각 CLI를 **Discord 봇 계정 하나씩**으로 감싸고, 브릿지 프로세스가 "누가 초안 쓰고, 누가 검토하고, 안 맞으면 누가 캐스팅보트를 쥐는지"를 오케스트레이션하도록 만들었습니다. 검토자가 말로만 지적하는 게 아니라 같은 작업 폴더에서 **직접 코드를 고치고 커밋까지** 하게 만든 `codev` 모드, 그리고 봇 하나가 한도를 다 쓰면 **다른 봇에게 역할을 자동으로 넘기는 사용량 가드**가 이 과정에서 나온 핵심 설계입니다.
+
+## 아키텍처
+
+```mermaid
+flowchart TD
+    U["Discord 채널\n(사용자 메시지)"] --> B["bridge.js\n(Node.js, discord.js)"]
+
+    B -->|"사용량 가드 통과 시\n역할 배정"| G{"usageGuard\n임계치 확인"}
+    G -->|"낮음 → 교체"| G
+    G -->|"정상"| O
+
+    subgraph Debate["debate 파이프라인"]
+        O["Owner CLI\n(예: Claude Code)\n초안 작성"] --> R["Reviewer CLI\n(예: Codex)\n검토"]
+        R -->|"STATUS: REVISE"| O
+        R -->|"STATUS: APPROVE"| F["최종 채택"]
+        R -->|"maxRounds 초과"| M["Moderator CLI\n(예: Antigravity/Gemini)\n다수결 투표"]
+        M --> F
+    end
+
+    R -.->|"codev: true 이면\nreviewer가 owner cwd\n공유해서 파일 직접 수정"| CW["owner 작업 폴더\n(git repo)"]
+    F -->|"codev 모드"| CM["moderator가 요약 +\n커밋 메시지 생성\n→ git commit 자동 실행"]
+    CM -->|"사람이 !push 입력해야"| PUSH["git push\n(원격 저장소)"]
+
+    F --> D["⭐ 최종 결과\nDiscord 채널에 응답"]
+    B --> L["logs/*-decisions.jsonl\n(라운드·투표·커밋 감사 로그)"]
+
+    B <-->|"coach.py --json --once"| UG["usage-coach\n(WSL Ubuntu, codexbar 조회)"]
+```
+
+- **오케스트레이션**: `bridge.js` 하나가 3개 Discord 봇 클라이언트를 물고 있으면서, 메시지 하나당 CLI들을 `child_process.spawn`으로 순차/조건부 호출합니다.
+- **신뢰성**: 사용량 가드는 조회 실패 시 항상 "정상"으로 간주하는 **페일 오픈** 설계 — 부가 기능 장애가 핵심 기능(대화)을 막지 않도록 했습니다.
+- **안전장치**: codev 모드의 `git commit`은 자동이지만 `git push`는 반드시 사람이 `!push`를 입력해야 나가도록 분리해, AI가 원격 저장소까지 자동으로 건드리지 않게 설계했습니다.
+
 ---
 
 ## 목차
