@@ -11,8 +11,46 @@ Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇�
 - 각 봇은 비대화형(one-shot) CLI 호출로 동작하며(`claude -p`, `codex exec`, `agy --print`), 세션 컨텍스트는 브릿지가 직접 관리합니다.
 - 각 봇의 CLI 호출은 `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox` 류 플래그로 승인 없이 실행됩니다 — 신뢰된 로컬 환경에서만 쓰세요.
 
+## debate 파이프라인 상세
+
+1. **owner 초안**: `chCfg.cwd[owner]`에서 owner CLI가 `prompt`로 초안 작성.
+2. **reviewer 검토 라운드** (최대 `maxRounds`회 반복):
+   - reviewer가 초안 보고 `STATUS: APPROVE`(승인) 또는 `STATUS: REVISE` + 수정 지시를 반환.
+   - `APPROVE`면 즉시 라운드 종료. `REVISE`면 owner가 피드백 반영해 재작성 후 다음 라운드.
+   - 마지막 라운드까지 `REVISE`면 owner 재작성 없이 바로 moderator 패널로 넘어감.
+3. **moderator 패널** (APPROVE로 안 끝났을 때만): 각 moderator가 "초안 유지" vs "reviewer 재작성 채택" 중 투표, 다수결로 최종안 확정. 채택 결과는 `⭐ 최종 채택` 메시지로 안내.
+4. **codev 모드**(`chCfg.debate.codev: true`)면 위 사이클이 끝난 뒤 `finalizeCodev` 실행 — 아래 [codev 모드] 참고.
+
+모든 라운드/투표/채택 결과는 `appendDecisionLog`로 `logs/*-decisions.jsonl`에 기록됩니다.
+
+## codev 모드 (동시 개발)
+
+`config.json`의 해당 채널 `debate.codev`를 `true`로 켜면, reviewer가 "검토만" 하지 않고 **owner와 같은 작업 디렉터리(`chCfg.cwd[owner]`)를 공유해서 실제 파일을 직접 고칩니다**.
+
+- reviewer 프롬프트가 review 전용 문구 대신 "직접 문제 파일을 열어서 고쳐라" 지시로 바뀝니다.
+  - 고칠 게 없으면 `STATUS: APPROVE`.
+  - 고쳤으면 `STATUS: REVISE` + 파일:라인 단위로 뭘 고쳤는지 요약.
+- owner는 reviewer가 고친 내용을 확인하고 남은 작업을 이어가거나 요약만 남깁니다.
+- 사이클 종료 후 `finalizeCodev`가 자동 실행됩니다:
+  1. moderator 중 첫 번째(`moderatorKeys[0]`)가 전체 작업을 한 문단 요약 + `COMMIT: <메시지>` 형식으로 커밋 메시지 생성.
+  2. owner의 작업 디렉터리에서 `git add -A && git commit -m "<메시지>"` 자동 실행(`gitCommit`).
+  3. **push는 자동으로 하지 않음** — 커밋 결과와 함께 `!push` 안내 메시지를 채널에 남기고, 사용자가 직접 `!push`를 입력해야 실제 push가 나갑니다.
+- `!push` 명령은 `chCfg.debate.owner`로 지정된 봇의 클라이언트에서만 처리(중복 push 방지)하며, 해당 봇의 작업 디렉터리에서 `git push` 실행 결과를 답장으로 알려줍니다.
+
+## 명령어 목록
+
+| 명령어 | 설명 |
+|---|---|
+| `!quick <질문>` | debate 건너뛰고 각 봇이 독립적으로 즉시 답변 |
+| `!help` | 사용 가능한 명령어 안내 (대표 봇 1개만 응답, turn 정리 대상 제외) |
+| `!usage` | 봇별 사용량 잔량(%) 확인 (`usageGuard` 꺼져 있으면 안내만) |
+| `!push` | codev 모드에서 자동 커밋된 변경사항을 실제로 push (owner 봇 채널에서만 동작) |
+| `!stop` / `!start` / `!restart` | 봇 실행 중단 / 재개 / 세션(대화 컨텍스트) 초기화 |
+| `클로드:`, `코덱스:` 등 별명 접두어, `@멘션` | 특정 봇 1:1 지목 대화 |
+
 ## 기능
 
+- **codev 모드**: reviewer가 검토만 하는 게 아니라 owner와 같은 cwd에서 실제 파일을 직접 고치는 동시개발 모드. 종료 시 moderator가 요약+커밋 메시지 생성 후 자동 `git commit`, 실제 push는 `!push`로 사용자 확인 후 실행.
 - **세션 제어**: `!stop`, `!start`, `!restart` (+ 특정 봇 alias)로 봇 실행 중단/초기화.
 - **명령어 안내**: `!help`로 사용 가능한 명령어 목록을 봇이 직접 올림. 사람이 보낸 일반 메시지와
   달리 `clearChannelSessions`가 정리하지 않으니 계속 남아있고, 필요하면 디스코드에서 직접 고정(핀) 가능.
@@ -56,7 +94,7 @@ Windows에서 콘솔 창 없이 백그라운드로 띄우려면 `run-hidden.vbs`
 |---|---|
 | `channels[].id` | 대상 Discord 채널 ID |
 | `channels[].cwd` | 봇별 작업 디렉터리(각 CLI가 실행될 경로) |
-| `channels[].debate` | `owner`(초안 작성), `reviewer`(검토), `moderators`(동률 시 다수결 패널), `maxRounds` |
+| `channels[].debate` | `owner`(초안 작성), `reviewer`(검토), `moderators`(동률 시 다수결 패널), `maxRounds`, `codev`(true면 reviewer가 owner cwd 공유해서 직접 파일 수정 + 완료 시 자동 커밋, [codev 모드] 참고) |
 | `bots[].tokenEnv` | 해당 봇 토큰이 담긴 환경변수 이름 |
 | `bots[].aliases` | 채팅에서 이 봇을 지목할 때 쓰는 접두어 |
 | `bots[].command` / `args` | 실행할 CLI 경로와 고정 인자 |
