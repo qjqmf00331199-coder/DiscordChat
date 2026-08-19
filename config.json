@@ -49,6 +49,16 @@
     "execTimeoutMs": 1800000,
     "approvalTimeoutMs": 300000,
     "usageDailyLimit": 100,
-    "usageWarnRatio": 0.8
+    "usageWarnRatio": 0.8,
+    "usageGuard": {
+      "enabled": false,
+      "pythonCommand": "python3",
+      "coachScript": "D:\\usage-coach\\coach.py",
+      "checkIntervalMs": 60000,
+      "threshold": 30,
+      "action": "handoff",
+      "providerMap": { "claude": "claude", "codex": "codex", "agy": "antigravity" },
+      "fallbackOrder": ["claude", "codex", "agy"]
+    }
   }
 }
