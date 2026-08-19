@@ -8,6 +8,52 @@ const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 const { channels, bots, settings } = config;
 
+// "!help"로 봇이 직접 올리는 안내문. 사람이 보낸 일반 메시지는 clearChannelSessions가
+// 다음 턴에 자동 삭제하지만, 봇이 보낸 메시지는 그 정리 로직이 건드리지 않아 계속 남는다.
+const HELP_TEXT = `📖 사용 가능한 명령어
+
+【기본 동작 — 아무 접두어 없이 그냥 메시지】
+→ 토론(debate) 모드 자동 실행
+  1) claude(owner)가 초안 작성
+  2) codex(reviewer)가 검토 → 문제없으면 즉시 채택, 문제있으면 수정 지시
+  3) 최대 3라운드 반복해도 합의 안 되면 agy(moderator)가 다수결로 최종 채택
+※ 이전 턴 메시지는 새 메시지 올 때 자동 정리됨 (최신 턴만 채널에 남음)
+
+【!quick <질문>】
+→ 토론 건너뛰고 claude·codex·agy 3명이 각자 독립적으로 즉시 답변
+예) !quick 이 함수 버그 어디 있어?
+
+【특정 봇 한 명만 지목해서 1:1 대화】
+→ 접두어 또는 멘션으로 지목, debate 없이 그 봇만 답변
+  - claude : "클로드:" / "claude:" / "c:"
+  - codex  : "코덱스:" / "codex:" / "x:"
+  - agy    : "agy:" / "a:" / "antigravity:"
+  - 또는 봇 계정 @멘션
+예) c: 여기 이 코드 리팩터링 해줘
+
+【!stop [봇명]】
+→ 해당 봇(생략 시 자신)이 실행 중인 작업 즉시 취소
+예) !stop / !stop codex
+
+【!restart [봇명]】
+→ 해당 봇의 대화 세션(이어가기 컨텍스트) 초기화, 다음 질문부터 새 대화로 시작
+예) !restart / !restart agy
+
+【!start [봇명]】
+→ 안내용(봇은 항상 대기 중이라 실제 동작 없음, 확인 메시지만 응답)
+
+【!usage】
+→ 봇별 실시간 사용량 잔량(%) 확인 (usage-coach 연동 켜져 있을 때만)
+
+【!help】
+→ 이 안내문 다시 보기 (이 메시지는 자동 삭제되지 않으니 디스코드에서 직접 고정해도 됨)
+
+⚙️ 참고
+- 일일 호출 한도: 봇당 100회(자정 리셋), 80% 넘으면 답변에 ⚠️ 경고 포함
+- 한도 초과 시 🚫 메시지로 알려주고 그날은 응답 안 함
+- 작업 중엔 ⏳ 상태 메시지가 15초마다 경과시간 갱신, 끝나면 ✅ 완료(N초)로 표시
+- 사용량 가드 켜져 있으면: 봇 하나가 임계치 밑으로 떨어질 때 debate 역할을 자동으로 다른 봇에게 넘김`;
+
 function stripAnsi(str) {
   return str
     .replace(/\x1B\[[0-9;:<=>?]*[ -\/]*[@-~]/g, '')
@@ -578,6 +624,17 @@ async function launchBotClient(botCfg) {
       } else if (control.action === 'restart') {
         session.resetSession();
         message.reply(`[${botCfg.key}] 대화 초기화함`);
+      }
+      return;
+    }
+
+    if (/^!help$/i.test(cleaned.trim())) {
+      // 클라이언트 3개가 같은 메시지를 각자 받으므로, 하나만 올리게 대표 봇(첫 설정 봇)만 응답.
+      // channel.send로 직접 보내고 session/lastAnswerMsgs엔 안 담아서 turn 정리 대상이 안 됨.
+      if (botCfg.key === bots[0].key) {
+        for (const chunk of chunkText(HELP_TEXT, settings.maxMessageLength)) {
+          message.channel.send(chunk).catch(() => {});
+        }
       }
       return;
     }

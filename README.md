@@ -14,6 +14,8 @@ Discord 채널을 여러 LLM CLI(Claude Code, Codex, Antigravity/Gemini)를 잇�
 ## 기능
 
 - **세션 제어**: `!stop`, `!start`, `!restart` (+ 특정 봇 alias)로 봇 실행 중단/초기화.
+- **명령어 안내**: `!help`로 사용 가능한 명령어 목록을 봇이 직접 올림. 사람이 보낸 일반 메시지와
+  달리 `clearChannelSessions`가 정리하지 않으니 계속 남아있고, 필요하면 디스코드에서 직접 고정(핀) 가능.
 - **일일 사용량 가드**: `settings.usageDailyLimit` 기준으로 봇별 호출 횟수를 `logs/usage-counts.json`에 누적, 자정에 리셋. `usageWarnRatio` 넘으면 경고.
 - **결정 로그**: debate 라운드, moderator 투표, 최종 채택 결과를 `logs/*-decisions.jsonl`에 append-only로 기록 (감사 추적용).
 - **핀 고정 상태 메시지**: 작업 중/완료/소요 시간을 채널에 실시간 업데이트.
